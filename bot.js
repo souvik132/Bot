@@ -2,113 +2,87 @@ const {
   default: makeWASocket,
   useSingleFileAuthState,
   DisconnectReason,
-  makeInMemoryStore
+  fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
-
 const { Boom } = require('@hapi/boom');
-const { state, saveState } = useSingleFileAuthState('./auth.json');
-  default: makeWASocket,
-  useSingleFileAuthState,
-  downloadContentFromMessage
-} = require('@whiskeysockets/baileys');
 const fs = require('fs');
-const os = require('os');
+const P = require('pino');
 
+// Auth state file
 const { state, saveState } = useSingleFileAuthState('./auth.json');
-let savedVVBuffer = null;
 
-async function startBot() {
+// Start bot
+async function startSock() {
+  const { version } = await fetchLatestBaileysVersion();
   const sock = makeWASocket({
-    auth: state,
-    printQRInTerminal: true
+    version,
+    logger: P({ level: 'silent' }),
+    printQRInTerminal: true,
+    auth: state
   });
 
+  // Save session automatically
   sock.ev.on('creds.update', saveState);
 
-  sock.ev.on('messages.upsert', async ({ messages }) => {
+  // Listen for incoming messages
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (!messages || !messages[0]) return;
+
     const msg = messages[0];
     if (!msg.message || msg.key.fromMe) return;
 
-    const from = msg.key.remoteJid;
-    const m = msg.message;
-    const text =
-      m?.conversation || m?.extendedTextMessage?.text || '';
-    const input = text.trim().toLowerCase();
+    const sender = msg.key.remoteJid;
+    const body = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
 
-    // View Once image capture
-    if (m?.imageMessage?.viewOnce) {
-      try {
-        const stream = await downloadContentFromMessage(m.imageMessage, 'image');
-        let buffer = Buffer.from([]);
-        for await (const chunk of stream) {
-          buffer = Buffer.concat([buffer, chunk]);
-        }
-        savedVVBuffer = buffer;
-        console.log('✅ View Once ফটো সেভ হয়েছে!');
-      } catch (err) {
-        console.log('❌ VV সেভ সমস্যা:', err);
-      }
+    console.log(`📩 Message from ${sender}: ${body}`);
+
+    // Commands
+    if (body === '.ping') {
+      await sock.sendMessage(sender, { text: '✅ Bot is active!' });
     }
 
-    // .vv command to send saved photo
-    if (input === '.vv') {
-      if (savedVVBuffer) {
-        await sock.sendMessage(from, {
-          image: savedVVBuffer,
-          caption: '🖼️ View Once ফটো বারবার দেখা যাবে!'
-        });
-      } else {
-        await sock.sendMessage(from, {
-          text: '❗ এখনও কোনো View Once ফটো সেভ হয়নি!'
-        });
-      }
+    else if (body === '.menu') {
+      const menu = `🤖 *Bot Command Menu*:
+      
+1. .ping – Check bot status
+2. .vv – Send view-once photo
+3. .tagall – Mention all users (Group only)
+4. .menu – Show this menu`;
+      await sock.sendMessage(sender, { text: menu });
     }
 
-    // .menu command
-    if (input === '.menu') {
-      const helpText = `
-📜 *Available Commands:*
--------------------------
-✅ .ping - Server status
-✅ .menu - Show all commands
-✅ .vv - View-once ফটো দেখতে
-✅ hi - Greet the bot
-✅ music [name] - Download YouTube audio
-✅ joke / quote / time / date
--------------------------
-Type any above 👆
-      `;
-      await sock.sendMessage(from, { text: helpText });
+    else if (body === '.vv') {
+      const imageBuffer = fs.readFileSync('./media/photo.jpg'); // Make sure this exists
+      await sock.sendMessage(sender, {
+        image: imageBuffer,
+        caption: '🖼️ One-time photo',
+        viewOnce: true
+      });
     }
 
-    // .ping command
-    if (input === '.ping') {
-      const used = process.memoryUsage().heapUsed / 1024 / 1024;
-      const totalMem = os.totalmem() / 1024 / 1024;
-      const freemem = os.freemem() / 1024 / 1024;
-      const cpu = os.cpus()[0].model;
-      const platform = os.platform();
-      const uptime = os.uptime();
+    else if (body === '.tagall' && msg.key.participant) {
+      const groupMetadata = await sock.groupMetadata(sender);
+      const participants = groupMetadata.participants.map(p => p.id);
+      const mentions = participants.map(id => ({ tag: `@${id.split('@')[0]}`, id }));
 
-      const pingText = `
-🏓 *PONG! Server Info:*
--------------------------
-🧠 CPU: ${cpu}
-🖥️ Platform: ${platform}
-📊 RAM Used: ${used.toFixed(2)} MB
-💾 Free RAM: ${freemem.toFixed(2)} MB
-📈 Uptime: ${Math.floor(uptime / 60)} mins
-📂 Total RAM: ${totalMem.toFixed(2)} MB
-⏱️ Time: ${new Date().toLocaleTimeString()}
-      `;
-      await sock.sendMessage(from, { text: pingText });
+      await sock.sendMessage(sender, {
+        text: '👥 *Tagging all members!*',
+        mentions: participants
+      });
     }
+  });
 
-    // hi
-    if (input === 'hi') {
-      await sock.sendMessage(from, { text: '👋 Hello! Type `.menu` to see all commands.' });
+  // Handle disconnect
+  sock.ev.on('connection.update', (update) => {
+    const { connection, lastDisconnect } = update;
+    if (connection === 'close') {
+      const shouldReconnect = (lastDisconnect.error = Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+      console.log('📴 Connection closed. Reconnecting...', shouldReconnect);
+      if (shouldReconnect) startSock();
+    } else if (connection === 'open') {
+      console.log('✅ Bot connected!');
     }
   });
 }
 
-startBot();
+startSock();
