@@ -1,6 +1,14 @@
 const {
   default: makeWASocket,
   useSingleFileAuthState,
+  DisconnectReason,
+  makeInMemoryStore
+} = require('@whiskeysockets/baileys');
+
+const { Boom } = require('@hapi/boom');
+const { state, saveState } = useSingleFileAuthState('./auth.json');
+  default: makeWASocket,
+  useSingleFileAuthState,
   downloadContentFromMessage
 } = require('@whiskeysockets/baileys');
 const fs = require('fs');
